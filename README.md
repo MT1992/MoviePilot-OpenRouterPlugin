@@ -1,9 +1,10 @@
 # MoviePilot 插件：OpenRouter 免费模型助手
 
-自动从 **OpenRouter** 拉取免费（零价）模型清单，并把选中的模型**一键填充到 MoviePilot 智能助手（LLM）配置**。
+自动从 **OpenRouter** 拉取免费（零价）模型清单，**自动测速并检测每个模型能否调用**，
+再把最优模型一键填充到 MoviePilot 智能助手（LLM）配置。
 
 - 插件 ID：`OpenRouterHelper`
-- 版本：`v1.0.0`
+- 版本：`v1.1.0`
 - 依赖：`requests`、`python-dotenv`（MoviePilot 均已自带）
 - 仓库：<https://github.com/MT1992/MoviePilot-OpenRouterPlugin>
 
@@ -23,10 +24,10 @@ MoviePilot-OpenRouterPlugin/
 │   └── requirements.txt
 ├── plugins.v3/openrouterhelper/             # v3 插件本体（代码同上，见 §9 版本适配）
 ├── dist/
-│   ├── openrouterhelper-1.0.0.zip           # 手动安装包（解压即用）
+│   ├── openrouterhelper-1.1.0.zip           # 手动安装包（解压即用）
 │   └── MoviePilot-OpenRouterPlugin-repo.zip # 整仓库包（可直接推 GitHub）
 └── dev/                                     # 开发自检（不部署）
-    ├── selftest.py                          # 46 项离线自检
+    ├── selftest.py                          # 91 项离线自检
     ├── or_models.sample.json                # 真实抓取的 OpenRouter 目录快照
     └── _stubs/                              # 模拟 MoviePilot 宿主的桩模块
 ```
@@ -71,7 +72,7 @@ cd MoviePilot-OpenRouterPlugin
 
 ```bash
 # 1) 解压安装包，得到 openrouterhelper/ 目录
-unzip dist/openrouterhelper-1.0.0.zip
+unzip dist/openrouterhelper-1.1.0.zip
 
 # 2) Docker：拷进容器（注意是 app 两层）
 docker cp openrouterhelper <容器名>:/app/app/plugins/
@@ -169,10 +170,17 @@ MoviePilot 官方就是从 `/app/app/plugins/` 加载插件，该目录位于**�
 | 同时启用智能助手 | 一并把 `AI_AGENT_ENABLE` 置为 true | 关 |
 | API 地址 | 写入 `LLM_BASE_URL` | `https://openrouter.ai/api/v1` |
 | 模型目录接口 | 拉取清单用，无需鉴权 | `https://openrouter.ai/api/v1/models` |
-| 免费模型 | 写入 `LLM_MODEL`，下拉从目录动态生成 | 空 |
+| 免费模型 | 写入 `LLM_MODEL`，下拉从目录动态生成并按测速排行 | 空 |
 | 提供商 | 写入 `LLM_PROVIDER` | `openrouter` |
 | 接口协议 | 写入 `LLM_API_PROTOCOL` | `chat_completions` |
-| 自动刷新间隔(小时) | 定时刷新目录，`0` 关闭 | `12` |
+| 目录刷新间隔(小时) | 定时刷新清单，`0` 关闭 | `12` |
+| **启用自动测速与可用性检测** | 定时探测每个免费模型的延迟与可调用性 | 关 |
+| **自动测速间隔(小时)** | 定时探测周期，`0` 关闭 | `6` |
+| **自动切换到最快可用模型** | 测速后把 `LLM_MODEL` 换成延迟最低的可用模型 | 关 |
+| **测速并发数** | 同时探测几个模型，`1-16`。越大越快但越易触发上游限流 | `4` |
+| **单次探测超时(秒)** | 单个模型等待上限，超时判为不可用 | `45` |
+| **每次最多探测模型数** | `0` = 全部（**每探一个消耗一次免费额度**） | `0` |
+| **探测问题** | 探测时发送的内容，越短越省 token | `hi` |
 | 走系统代理 | 使用 MoviePilot 的 `PROXY_HOST` | 关 |
 | 仅显示支持工具调用 | 过滤掉不支持 function calling 的免费模型 | **开** |
 | 应用地址 / 应用名称 | OpenRouter 归属头 `HTTP-Referer` / `X-Title`（可选） | 空 / `MoviePilot` |
@@ -186,29 +194,106 @@ MoviePilot 官方就是从 `/app/app/plugins/` 加载插件，该目录位于**�
 
 1. 到 <https://openrouter.ai/keys> 注册并创建一个 API Key（免费模型也要求鉴权）。
 2. 插件里填入 API Key，打开「启用插件」，保存 → 配置页会自动拉取一次模型目录。
-3. 在「免费模型」下拉里挑一个（标题形如 `NVIDIA: Nemotron 3 Ultra (free) · nvidia/...:free [977K/工具]`）。
-4. 打开「保存时自动填充」+「写入 app.env 持久化」，再保存一次即完成。
-5. 到 **设定 → 系统 → 基础设置 → 智能助手** 确认 `LLM 提供商` 已是 `openrouter`、模型已填入。
+3. **先测速**：点配置页/详情页的 `开始测速`（或调 `GET /probe` 接口）跑一轮，
+   之后下拉列表里每个模型都会带状态与延迟，并按「可用优先、快到慢」自动排序。
+4. 在「免费模型」下拉里挑一个（标题形如
+   `✓ NVIDIA: Nemotron 3 Ultra (free) · nvidia/...:free [977K/工具/312ms]`）。
+5. 打开「保存时自动填充」+「写入 app.env 持久化」，再保存一次即完成。
+   若还打开了「自动切换到最快可用模型」，则后续每次测速都会自动把 `LLM_MODEL` 调成延迟最低的可用模型。
+6. 到 **设定 → 系统 → 基础设置 → 智能助手** 确认 `LLM 提供商` 已是 `openrouter`、模型已填入。
 
-> 下拉标题里的 `[977K/工具]` 表示上下文长度约 977K token、且该模型**支持 tool calling**。
-> 智能助手靠工具调用来查下载、搜资源，**建议保持「仅显示支持工具调用」开启**。
+> 下拉标题结构：`✓/✗  名称 · 模型id  [上下文/是否支持工具/探测结果]`。
+> `✓` 表示探测确认可调用，`✗` 表示探测失败（后面跟失败原因，如「额度耗尽」）；
+> 第三段没出现说明这个模型还没测过。智能助手靠工具调用来查下载、搜资源，
+> **建议保持「仅显示支持工具调用」开启**。
 
 ---
 
-## 5. 插件 API
+## 5. 测速与可用性检测
+
+### 它做什么
+
+对每个免费模型**实发一条最小对话请求**（`probe_prompt`，默认 `hi`，`max_tokens=8`），
+测出端到端延迟，并判定当前能否调用：
+
+| 状态 | 含义 | 触发条件 |
+|------|------|---------|
+| `可用` | 正常返回内容 | HTTP 200 且含 `choices` |
+| `无Key` | 未填 API Key，**不发请求**直接短路 | `api_key` 为空 |
+| `鉴权失败` | Key 无效 / 未授权 | 401、403 |
+| `额度耗尽` | 免费配额用尽或被限流 | 429 |
+| `模型不存在` | 已下架 / id 变更 | 404 |
+| `请求被拒` | 模型不支持该协议或参数 | 400、422 |
+| `超时` | 超过「单次探测超时」未响应 | 连接超时 |
+| `网络异常` | DNS / 代理 / TLS 层失败 | 连接异常 |
+
+> 探测到 **401 或 429 会立即熔断**：置位中止标志，剩余模型直接标记 `已跳过`，不再发请求。
+> 这是为了不让一次误配置（比如 Key 写错）把当天的免费额度白烧光。
+
+### 三种触发方式
+
+1. **定时**：打开「启用自动测速」，按「自动测速间隔」跑（与目录刷新错开 30 分钟）。
+2. **手动**：配置页 / 详情页的测速入口，或调 `GET /probe`。
+3. **自动切换**：每次测速后，若当前 `LLM_MODEL` 探测失败，**无条件**换到最快可用模型；
+   若还打开了「自动切换到最快可用模型」，则当前模型哪怕能用也会换成更快的那个。
+   切换结果会写回插件配置（`update_config`）并同步到智能助手。
+
+### 代价与建议
+
+**一次探测 = 一次真实请求 = 消耗一次免费额度**。16 个免费模型全探一遍就是 16 次，
+而未充值账号上限约 50 次/天。所以：
+
+- 首次用建议把「每次最多探测模型数」设成 `6~8`，先试水；熟悉了再放开到 `0`（全部）。
+- 「自动测速间隔」别设太小，6~12 小时足够（免费模型列表变动不频繁）。
+- 想让测速不占额度的办法：直接用自己的真实 key 跑一次，把结果留着看 —— 探测结果会缓存，
+  下次打开配置页不会重复探测。
+
+### 结果存放在哪
+
+- 缓存：`get_data("probe_cache")` → `{"results": {model_id: {status, latency_ms, code, error, at}}, "ts": ...}`
+- 刷新目录时会**自动剔除已下架模型**的探测记录，避免界面显示陈旧数据。
+- 探测记录不做 TTL 过期（`refresh_hours` 只管模型目录），因为它只在你想看时才被读取。
+
+---
+
+## 6. 插件 API
 
 注册在 `/api/v1/plugin/OpenRouterHelper/<path>`，认证方式 `bear`：
 
 | 路径 | 作用 |
 |------|------|
-| `GET /models` | 返回缓存的免费模型列表 |
+| `GET /models` | 返回免费模型列表（已按测速排行，附每个模型的 `status` / `latency_ms` / `status_label`） |
 | `GET /refresh` | 强制重新拉取模型目录 |
 | `GET /apply` | 把当前选择写入智能助手配置 |
-| `GET /test` | 向所选模型发一条测试消息，验证 Key 与模型可用性 |
+| `GET /test` | 向**所选模型**发一条测试消息，验证 Key 与模型可用性 |
+| `GET /probe` | **探测全部**免费模型（或前 N 个），返回逐模型结果与汇总；命中 401/429 自动熔断 |
+| `GET /probe_model?model=<id>` | 只探测指定模型；不传则探测当前选中的模型 |
+| `GET /ranking` | 返回测速排行榜（可用优先、延迟升序） |
+
+`/probe` 返回示例（节选）：
+
+```json
+{
+  "success": true,
+  "message": "探测完成：可用 12/16，最快 nvidia/nemotron-3.5-lightning:free（312ms）",
+  "data": {
+    "results": {
+      "nvidia/nemotron-3.5-lightning:free": {
+        "status": "ok", "latency_ms": 312, "code": 200, "error": "", "at": 1760000000.0
+      }
+    },
+    "summary": {
+      "total": 16, "ok": 12, "failed": 4, "skipped": 0,
+      "aborted": false, "elapsed_ms": 2870, "avg_ms": 640,
+      "fastest": {"id": "nvidia/nemotron-3.5-lightning:free", "latency_ms": 312}
+    }
+  }
+}
+```
 
 ---
 
-## 6. 实测结论（2026-10-12）
+## 7. 实测结论（2026-10-12）
 
 拉取 `https://openrouter.ai/api/v1/models`（**无需鉴权**）：共 **458** 个模型。
 
@@ -251,9 +336,23 @@ MoviePilot 官方就是从 `/app/app/plugins/` 加载插件，该目录位于**�
 - 模型目录会变（下架 / 转付费）。插件在刷新时若发现当前选中的模型已不在免费列表，会在日志里提示重新选择。
 - MoviePilot 配置优先级为 **环境变量 > app.env ≈ WEB 界面**。若 `LLM_*` 已由 Docker 环境变量注入，写 `app.env` 不会覆盖它，此时请改用环境变量或去掉对应 `-e`。
 
+### 熔断实测（2026-10-12）
+
+用无效 Key 对 16 个模型做真实探测（并发 4），结果：
+
+```
+开始探测 16 个模型（并发 4，超时 45s，约消耗 16 次免费额度）
+探测熔断（鉴权失败），停止剩余 15 个模型的探测以节省配额
+探测完成：可用 0/16
+summary = {total: 16, ok: 0, failed: 16, skipped: 11, aborted: true, elapsed_ms: 1671}
+```
+
+实际只发出 **5 次**请求就熔断（4 个并发 + 1 个在途），其余 11 个标记 `已跳过` ——
+熔断确实按预期省下了 11 次额度。错误信息为 OpenRouter 返回的 `401 User not found.`。
+
 ---
 
-## 7. 开发自检
+## 8. 开发自检
 
 不装 MoviePilot 也能验证插件逻辑（用桩模块模拟宿主 + 真实目录样本回放）：
 
@@ -263,12 +362,14 @@ python dev/selftest.py
 
 覆盖：免费模型判定 / tool calling 标注 / 目录拉取过滤 / 写回 `settings` / 模块热重载 /
 `app.env` 持久化（含目录自动创建）/ 幂等（无变化不重载）/ 表单与详情页结构 /
-API 的成功·401·429 分支 / 定时任务注册 / 选中模型下架兜底 / 模块管理器三种降级路径。
-当前 **46 项全部通过**。
+API 的成功·401·429 分支 / 定时任务注册 / 选中模型下架兜底 / 模块管理器三种降级路径 /
+**测速与探测**（状态分类表、无 Key 短路、超时与网络异常归类、并发全量探测与延迟排序、
+401·429 熔断、自动切换最快可用模型、切换结果持久化、探测缓存与下架清理、下拉标注渲染）。
+当前 **91 项全部通过**。
 
 ---
 
-## 8. 实现要点
+## 9. 实现要点
 
 - 宿主基类、配置对象、模块管理器都做了多路径兼容导入，路径逐条取自官方源码而非猜测：
   `_PluginBase` ← `app.plugins` / `app.sdk.plugin`；`settings` ← `app.core.config` / `app.sdk.config` / `app.runtime.config`；
@@ -279,16 +380,20 @@ API 的成功·401·429 分支 / 定时任务注册 / 选中模型下架兜底 /
   配置本身已写入 `app.env`，重启后必然生效，功能不受影响。
 - `apply_to_agent()` 幂等：目标值已一致时不写文件、不重载模块，避免每次启动都触发全量模块重载。
 - 模型清单带 TTL 缓存（`refresh_hours`），启动时不发网络请求，只在打开配置页/定时任务/手动刷新时拉取。
+- **测速用线程池并发**（标准库 `ThreadPoolExecutor`，实例级 `threading.Event` 做熔断信号），
+  不引入额外依赖；写入共享结果时用锁保护，`as_completed` 边跑边收，不会因个别模型卡住而阻塞整体。
+- **探测结果与模型目录解耦存两份缓存**：目录按 `refresh_hours` 过期，探测结果长期保留，
+  刷新目录时只剔除已消失的模型，避免「一刷新就把测速数据清空」。
 
 ---
 
-## 9. 版本适配（v2 / v3）
+## 10. 版本适配（v2 / v3）
 
 仓库同时提供 `plugins.v2` 与 `plugins.v3` 两套目录，插件代码一致，靠导入路径兼容两种宿主。
 
 | 宿主 | 市场清单 | 加载目录 | 状态 |
 |------|---------|---------|------|
-| MoviePilot v2 | `package.v2.json` | `plugins.v2/` | 43 项离线自检通过 |
+| MoviePilot v2 | `package.v2.json` | `plugins.v2/` | 91 项离线自检通过 |
 | MoviePilot v3 | `package.v3.json`（`system_version: >=3.0.0`） | `plugins.v3/` | 导入路径已逐条对齐官方 v3 源码；**未在真实 v3 实例上运行验证** |
 
 v3 的差异（均按官方源码核对，非推测）：

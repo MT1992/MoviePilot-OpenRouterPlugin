@@ -9,6 +9,9 @@ OpenRouterHelper 离线自检脚本（开发用，不属于插件本体）
     - get_form / get_page 结构
     - /test 接口的成功、401、429 分支
     - 模块管理器三种降级路径（无管理器 / 无 load_modules / 管理器报错）
+    - 测速与可用性探测：状态分类、缺 Key 短路、超时/网络异常、
+      并发全量探测与延迟排序、401/429 熔断、自动切换最快可用模型、
+      定时测速任务注册、探测结果持久化与下架清理
 
 运行：
     "C:/Users/wangh/.workbuddy/binaries/python/envs/default/Scripts/python.exe" dev/selftest.py
@@ -18,6 +21,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -213,8 +217,12 @@ def main():
     page = plugin.get_page()
     check("get_page 返回列表", isinstance(page, list) and len(page) >= 3)
     check(
-        "详情页含可用免费模型告警",
-        any("可用免费模型" in (p.get("props") or {}).get("title", "") for p in page),
+        "详情页含测速排行告警",
+        any("测速排行" in (p.get("props") or {}).get("title", "") for p in page),
+    )
+    check(
+        "详情页含不可用模型告警",
+        any("不可用" in (p.get("props") or {}).get("title", "") for p in page),
     )
 
     print("\n=== 7. API 端点 ===")
@@ -302,6 +310,266 @@ def main():
         check("管理器初始化失败被捕获（配置不受影响）", False, repr(err))
 
     openrouterhelper.ModuleManager = real_mm
+
+    print("\n=== 11. 测速与可用性探测 ===")
+    ids = [m["id"] for m in plugin._models_cache]
+    m_a, m_b = ids[0], ids[1]
+
+    # 11.1 探测请求体
+    payload = plugin._probe_payload("test/model:free")
+    check(
+        "探测请求体最小化（model/messages/max_tokens/temperature）",
+        payload["model"] == "test/model:free"
+        and payload["messages"] == [{"role": "user", "content": "hi"}]
+        and payload["max_tokens"] == 8
+        and payload["temperature"] == 0,
+        json.dumps(payload, ensure_ascii=False),
+    )
+
+    # 11.2 状态分类表
+    cls_map = {
+        200: "ok",
+        401: "auth",
+        403: "auth",
+        429: "quota",
+        404: "missing",
+        400: "badreq",
+        422: "badreq",
+        500: "error",
+        502: "error",
+    }
+    bad_cls = {c: OpenRouterHelper._classify(c, {}) for c, want in cls_map.items()
+               if OpenRouterHelper._classify(c, {}) != want}
+    check("HTTP 状态码分类正确", not bad_cls, str(bad_cls))
+
+    # 11.3 单模型探测：成功
+    openrouterhelper.requests.post = fake_post_ok
+    item = plugin._probe_one(m_a)
+    check("探测成功状态为 ok", item["status"] == "ok", item["status"])
+    check(
+        "返回延迟为整数毫秒",
+        isinstance(item["latency_ms"], int) and item["latency_ms"] >= 0,
+        repr(item["latency_ms"]),
+    )
+    check("记录 HTTP 200", item["code"] == 200)
+
+
+    # 11.4 200 但无 choices 不算可用
+    def fake_post_empty(url, **kwargs):
+        return _FakeResp({"id": "x", "choices": []})
+
+    openrouterhelper.requests.post = fake_post_empty
+    check("200 但无 choices 判为 error", plugin._probe_one(m_a)["status"] == "error")
+
+    # 11.5 缺 Key 时不打上游
+    saved_key = plugin._api_key
+    plugin._api_key = ""
+    before_posts = calls["post"]
+    item = plugin._probe_one(m_a)
+    check("无 Key 时状态为 no_key", item["status"] == "no_key", item["status"])
+    check("无 Key 时不发起网络请求（省一次往返）", calls["post"] == before_posts)
+    plugin._api_key = saved_key
+
+    # 11.6 超时 / 网络异常
+    def fake_post_timeout(url, **kwargs):
+        raise openrouterhelper.requests.exceptions.Timeout("timed out")
+
+    def fake_post_conn(url, **kwargs):
+        raise ConnectionError("dns failure")
+
+    openrouterhelper.requests.post = fake_post_timeout
+    check("超时归类为 timeout", plugin._probe_one(m_a)["status"] == "timeout")
+    openrouterhelper.requests.post = fake_post_conn
+    check("连接异常归类为 network", plugin._probe_one(m_a)["status"] == "network")
+
+    # 11.7 全量并发探测 + 排行
+    def make_post_latency(delay_map):
+        def _post(url, **kwargs):
+            calls["post"] += 1
+            model = (kwargs.get("json") or {}).get("model")
+            time.sleep(delay_map.get(model, 0.005))
+            return _FakeResp(
+                {"id": "gen", "choices": [{"message": {"role": "assistant", "content": "hi"}}]}
+            )
+        return _post
+
+    plugin._probe_results = {}
+    plugin._probe_concurrency = 4
+    plugin._probe_timeout = 45
+    delay_map = {mid: (i % 4) * 0.04 for i, mid in enumerate(ids)}
+    openrouterhelper.requests.post = make_post_latency(delay_map)
+
+    report = plugin.probe_models()
+    summary = report["data"]["summary"]
+    check("探测覆盖全部 16 个模型", summary["total"] == 16, str(summary))
+    check("全部判定为可用", summary["ok"] == 16, str(summary))
+    check("未触发熔断", summary["aborted"] is False)
+    check("统计平均延迟", isinstance(summary.get("avg_ms"), int), str(summary.get("avg_ms")))
+    check(
+        "给出最快模型",
+        bool(summary.get("fastest")) and summary["fastest"]["id"] in ids,
+        str(summary.get("fastest")),
+    )
+
+    ranked = plugin.ranked_models()
+    check("排行第一为可用模型", ranked[0].get("status") == "ok", str(ranked[0].get("status")))
+    lats = [m["latency_ms"] for m in ranked if m.get("status") == "ok"]
+    check("可用模型按延迟升序排列", lats == sorted(lats), str(lats))
+    check(
+        "排行项带状态中文标签",
+        ranked[0]["status_label"] == "可用",
+        ranked[0]["status_label"],
+    )
+
+    # 11.8 熔断：串行 + 全部 401，应立刻停止剩余探测
+    plugin._probe_results = {}
+    plugin._probe_concurrency = 1
+    openrouterhelper.requests.post = fake_post_401
+    report = plugin.probe_models()
+    summary = report["data"]["summary"]
+    check("鉴权失败触发熔断", summary["aborted"] is True)
+    check("熔断后放弃剩余模型", summary["skipped"] > 0, f"skipped={summary['skipped']}")
+    check("熔断批次里没有可用模型", summary["ok"] == 0)
+    check(
+        "结果中记录了 auth 状态",
+        any(v["status"] == "auth" for v in report["data"]["results"].values()),
+    )
+    check("熔断也写入了 404 之外的错误信息", "message" in report)
+
+    # 11.9 自动切换（当前模型不可用 → 切到最快可用）
+    plugin._probe_concurrency = 4
+    orig_probe = plugin.probe_models
+    plugin.probe_models = lambda *a, **k: {
+        "success": True,
+        "message": "stub",
+        "data": {"results": plugin._probe_results, "summary": {}},
+    }
+    plugin._probe_results = {
+        m_a: {"status": "quota", "latency_ms": None, "at": time.time(), "code": 429, "error": "limit"},
+        m_b: {"status": "ok", "latency_ms": 123, "at": time.time(), "code": 200, "error": ""},
+    }
+    plugin._model = m_a
+    plugin._auto_switch = False
+    plugin.apply_to_agent()
+    report = plugin.probe_and_maybe_switch()
+    check("当前模型不可用时自动切换", plugin._model == m_b, plugin._model)
+    check(
+        "切换原因标注为当前模型不可用",
+        (report.get("switched") or {}).get("reason") == "当前模型不可用",
+        str(report.get("switched")),
+    )
+    check("切换后同步写入 LLM_MODEL", settings.LLM_MODEL == m_b, settings.LLM_MODEL)
+    check("切换后持久化到插件配置", plugin.get_config().get("model") == m_b)
+
+    # 11.10 开着 auto_switch 且当前可用 → 仍切到更快者
+    plugin._probe_results = {
+        m_a: {"status": "ok", "latency_ms": 88, "at": time.time(), "code": 200, "error": ""},
+        m_b: {"status": "ok", "latency_ms": 400, "at": time.time(), "code": 200, "error": ""},
+    }
+    plugin._model = m_b
+    plugin._auto_switch = True
+    plugin.probe_and_maybe_switch()
+    check("开启自动切换后择优为最快模型", plugin._model == m_a, plugin._model)
+
+    plugin._model = m_b
+    plugin._auto_switch = False
+    plugin.probe_and_maybe_switch()
+    check("关闭自动切换且当前可用时保持不动", plugin._model == m_b, plugin._model)
+    plugin.probe_models = orig_probe
+
+    # 11.11 探测结果持久化
+    cache = plugin.get_data("probe_cache")
+    check(
+        "探测结果写入 probe_cache",
+        isinstance(cache, dict) and len(cache.get("results") or {}) > 0,
+        str(type(cache)),
+    )
+
+    # 11.12 定时测速任务
+    plugin._probe_enabled = True
+    plugin._probe_hours = 6
+    svc_ids = [s["id"] for s in plugin.get_service()]
+    check(
+        "开启自动测速后注册刷新+探测两个任务",
+        "OpenRouterHelper.Refresh" in svc_ids and "OpenRouterHelper.Probe" in svc_ids,
+        str(svc_ids),
+    )
+    plugin._probe_hours = 0
+    check(
+        "测速间隔为 0 时不注册探测任务",
+        all(s["id"] != "OpenRouterHelper.Probe" for s in plugin.get_service()),
+    )
+    plugin._probe_hours = 6
+
+    # 11.13 探测类 API
+    openrouterhelper.requests.post = fake_post_ok
+    r = plugin.api_probe_model(m_a)
+    check("api_probe_model 成功", r["success"] is True and r["data"]["status"] == "ok", r["message"])
+    saved_choice = plugin._model
+    plugin._model = ""
+    r = plugin.api_probe_model("")
+    check("api_probe_model 缺参时报错", r["success"] is False and "model" in r["message"], r["message"])
+    plugin._model = saved_choice
+    r = plugin.api_ranking()
+    check("api_ranking 返回榜单", r["success"] and r["data"]["ranked"][0]["status"] == "ok")
+    r = plugin.api_models()
+    check(
+        "api_models 带上探测统计",
+        "available" in r["data"] and r["data"]["probed"] >= 1,
+        str(r["data"].get("available")),
+    )
+    r = plugin.api_probe()
+    check("api_probe 返回汇总", r["success"] is True and r["data"]["summary"]["total"] >= 1)
+
+    # 11.14 配置页与详情页反映测速
+    plugin._probe_results = {
+        m_a: {"status": "ok", "latency_ms": 250, "at": time.time(), "code": 200, "error": ""},
+        m_b: {"status": "missing", "latency_ms": 90, "at": time.time(), "code": 404, "error": "no such model"},
+    }
+    form, defaults = plugin.get_form()
+    check(
+        "配置页默认值含测速开关与参数",
+        all(k in defaults for k in
+            ("probe_enabled", "probe_hours", "probe_concurrency", "probe_timeout",
+             "probe_limit", "probe_prompt", "auto_switch")),
+        str(sorted(defaults.keys())),
+    )
+    found = []
+    walk_for_model_select(form, found)
+    titles = [it["title"] for it in (found[0] if found else [])]
+    check(
+        "下拉标题给可用模型加 ✓ 与延迟",
+        any(t.startswith("✓") and "250ms]" in t for t in titles),
+        next((t for t in titles if "✓" in t), titles[0] if titles else ""),
+    )
+    check(
+        "下拉标题给不可用模型加 ✗ 与原因",
+        any(t.startswith("✗") and "模型不存在" in t for t in titles),
+        next((t for t in titles if "✗" in t), ""),
+    )
+    page = plugin.get_page()
+    rank_text = next(
+        (p["props"]["text"] for p in page if "测速排行" in p["props"].get("title", "")), ""
+    )
+    check("详情页列出可用模型延迟", "250ms" in rank_text, rank_text[:120])
+    bad_text = next(
+        (p["props"]["text"] for p in page if "不可用" in p["props"].get("title", "")), ""
+    )
+    check("详情页列出不可用模型", m_b in bad_text, bad_text[:120])
+
+    # 11.15 刷新目录后清理失效探测记录（模拟模型下架）
+    plugin._probe_results = {
+        "ghost/removed-model:free": {"status": "ok", "latency_ms": 1, "at": time.time()},
+        m_a: {"status": "ok", "latency_ms": 250, "at": time.time()},
+    }
+    openrouterhelper.requests.get = fake_get
+    plugin.refresh_models(force=True)
+    check(
+        "刷新后剔除已下架模型的测速记录",
+        "ghost/removed-model:free" not in plugin._probe_results,
+        str(list(plugin._probe_results)),
+    )
+    check("保留仍在列表中的测速记录", m_a in plugin._probe_results)
 
     print(f"\n{'=' * 46}\n结果：PASS={PASS}  FAIL={FAIL}\n{'=' * 46}")
     return 0 if FAIL == 0 else 1
