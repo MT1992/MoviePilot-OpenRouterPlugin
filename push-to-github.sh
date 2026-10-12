@@ -6,7 +6,7 @@
 #    1) 添加 SSH 公钥： https://github.com/settings/ssh/new
 #       把下面这条完整粘进去（Title 随便填，Key type 选 Authentication Key）：
 #
-#       ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMXQsYRK3VTRu0JqRqNJ63Q2P64WiitGm9LeCJjc7bBW wj-wyt@users.noreply.github.com
+#       ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMXQsYRK3VTRu0JqRqNJ63Q2P64WiitGm9LeCJjc7bBW MT1992@users.noreply.github.com
 #
 #    2) 新建空仓库： https://github.com/new
 #       Repository name 填 MoviePilot-OpenRouterPlugin
@@ -14,8 +14,8 @@
 #
 #  用法：
 #     ./push-to-github.sh <你的GitHub用户名> [仓库名]
-#     例：./push-to-github.sh wj-wyt
-#         ./push-to-github.sh wj-wyt MoviePilot-OpenRouterPlugin
+#     例：./push-to-github.sh MT1992
+#         ./push-to-github.sh MT1992 MoviePilot-OpenRouterPlugin
 #
 #  为什么走 SSH：本机到 github.com 的 HTTPS 被重置（TLS 层阻断），
 #  但 ssh.github.com:443 可用。~/.ssh/config 已把 github.com 重定向到该端口。

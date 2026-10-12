@@ -83,8 +83,8 @@ class OpenRouterHelper(_PluginBase):
     plugin_desc = "自动获取 OpenRouter 免费模型，并一键填充到智能助手(LLM)配置。"
     plugin_icon = "openrouterhelper.png"
     plugin_version = "1.0.0"
-    plugin_author = "wangh"
-    author_url = "https://github.com/wj-wyt"
+    plugin_author = "MT1992"
+    author_url = "https://github.com/MT1992"
     plugin_config_prefix = "openrouterhelper_"
     plugin_order = 20
     auth_level = 1

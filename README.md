@@ -91,12 +91,12 @@ cp icons/openrouterhelper.png /path/to/MoviePilot/app/plugins/icons/
 1. 把项目推到 GitHub 仓库（用 `dist/MoviePilot-OpenRouterPlugin-repo.zip` 解压上传，或用 git）。
    仓库根要有 `package.v2.json`（v2）或 `package.v3.json`（v3），且与 `plugins.v2/`、`icons/` 同级。
 2. MoviePilot → **设置 → 插件 → 插件市场 → 右上角齿轮 → 添加仓库**，
-   填 `https://github.com/<你的用户名>/<仓库名>`，刷新插件列表。
+   填 `https://github.com/MT1992/MoviePilot-OpenRouterPlugin`，刷新插件列表。
 3. 搜到「OpenRouter 免费模型助手」点安装。
 
 > `package.v2.json` 的 `"icon"` 支持纯文件名（官方插件即如此），也支持绝对地址。
 > 若你的环境取不到图标，改成
-> `https://raw.githubusercontent.com/<你>/<仓库名>/main/icons/openrouterhelper.png` 即可。
+> `https://raw.githubusercontent.com/MT1992/MoviePilot-OpenRouterPlugin/main/icons/openrouterhelper.png` 即可。
 
 #### 推到 GitHub 的两条路
 
@@ -108,7 +108,7 @@ cp icons/openrouterhelper.png /path/to/MoviePilot/app/plugins/icons/
 #   1) 添加公钥： https://github.com/settings/ssh/new
 #   2) 建空仓库： https://github.com/new   （名字 MoviePilot-OpenRouterPlugin，别勾 README）
 # 然后：
-./push-to-github.sh <你的GitHub用户名>
+./push-to-github.sh MT1992
 ```
 
 脚本依赖 `~/.ssh/config` 里已配好的重定向（把 `github.com` 转到 `ssh.github.com:443`）：
@@ -124,7 +124,7 @@ Host github.com
 如果机器上装了可用代理，也可以直接走 HTTPS，不用 SSH：
 
 ```bash
-git remote add origin https://github.com/<你>/MoviePilot-OpenRouterPlugin.git
+git remote add origin https://github.com/MT1992/MoviePilot-OpenRouterPlugin.git
 git -c http.proxy=http://127.0.0.1:7890 push -u origin main
 ```
 
