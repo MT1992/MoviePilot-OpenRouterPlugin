@@ -98,6 +98,36 @@ cp icons/openrouterhelper.png /path/to/MoviePilot/app/plugins/icons/
 > 若你的环境取不到图标，改成
 > `https://raw.githubusercontent.com/<你>/<仓库名>/main/icons/openrouterhelper.png` 即可。
 
+#### 推到 GitHub 的两条路
+
+本机直连 `github.com` 的 HTTPS 会被重置（TLS 层阻断），所以直接用 `https://` 推会失败。
+已实测可用的替代通道是 **SSH over 443**，仓库里备好了一键脚本 `push-to-github.sh`：
+
+```bash
+# 一次性准备（浏览器里各点一下）
+#   1) 添加公钥： https://github.com/settings/ssh/new
+#   2) 建空仓库： https://github.com/new   （名字 MoviePilot-OpenRouterPlugin，别勾 README）
+# 然后：
+./push-to-github.sh <你的GitHub用户名>
+```
+
+脚本依赖 `~/.ssh/config` 里已配好的重定向（把 `github.com` 转到 `ssh.github.com:443`）：
+
+```
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+如果机器上装了可用代理，也可以直接走 HTTPS，不用 SSH：
+
+```bash
+git remote add origin https://github.com/<你>/MoviePilot-OpenRouterPlugin.git
+git -c http.proxy=http://127.0.0.1:7890 push -u origin main
+```
+
 ### 装完的三个检查点
 
 | 检查 | 命令 / 位置 | 期望 |
