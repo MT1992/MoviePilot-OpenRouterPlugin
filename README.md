@@ -157,6 +157,70 @@ MoviePilot 官方就是从 `/app/app/plugins/` 加载插件，该目录位于**�
   `- /volume1/docker/moviepilot/plugins:/app/app/plugins`
   再 `docker compose up -d` 重建容器。
 
+### 如何更新到新版本
+
+**更新判定规则**（来自官方 `app/runtime/extensions/plugin/metadata.py`）：
+MoviePilot 把「已安装插件类里的 `plugin_version`」与「你仓库 `package.v2.json` /
+`package.v3.json` 里同一插件的 `"version"`」比对，**本地更低时**才把插件标成
+`has_update`，界面上才会出现更新入口：
+
+```python
+installed_version = getattr(plugin_class, "plugin_version", None)   # 1.0.0
+online_version = info.get("version")                                # 1.1.0
+plugin.has_update = self._version_compare(installed_version, "<", online_version)
+```
+
+所以「有没有更新可点」只取决于上面这两个版本号——本插件当前都是 `1.1.0`，
+你装的若是 `1.0.0`，下面这些入口就会出现。
+
+**在 MoviePilot 界面里更新（新版 UI）**
+
+1. **设置 → 插件**，点右上角刷新，重新拉取插件仓库清单。
+   （前提：这个 MP 实例的容器能访问 `github.com`。）
+2. 已安装的插件卡片**右上角出现「新盒子」小图标**（`plugin.has_update` 标记）。
+3. 卡片右下角 **⋮ 菜单 → 更新**：
+   - 更新来自绑定的同一个仓库 → 直接打开**版本历史**弹窗，点里面的**更新**即下载覆盖；
+   - 若出现「查看更新来源」→ 先弹出来源选择，选
+     `github.com/MT1992/MoviePilot-OpenRouterPlugin` 再更新。
+4. 装完后回到卡片，点 **⋮ → 高级操作 → 重载**，插件热重载，**不必重启容器**。
+   只有卡片上出现「需要重启」提示时，才去 **设置 → 重启 MoviePilot**。
+5. 打开插件配置页确认版本号已变、新功能已出现
+   （v1.1.0 起多出一组「启用自动测速与可用性检测」相关开关）。
+
+> **旧版 UI 找不到 ⋮ → 更新**时：去 **插件市场** 列表里搜到同名插件，
+> 直接点安装按钮，同样会以最新版覆盖安装，效果一致。
+
+> **`⋮ → 版本历史` 是回滚入口**，可以装指定旧版本。它要求仓库发布过 GitHub Release
+> 且清单里带 `"release": true`（本仓库两份清单都已带）。没发过 Release 时该弹窗是空的，
+> 去 <https://github.com/MT1992/MoviePilot-OpenRouterPlugin/releases/new> 选已有的 tag
+> `v1.1.0` 发布一次即可。
+
+**更新不会丢配置**：更新只覆盖插件**代码**目录 `/app/app/plugins/openrouterhelper/`；
+插件配置与探测缓存由宿主管理，存在 `PLUGIN_DATA_PATH` 下（Docker 即
+`/config/plugins/OpenRouterHelper/`，`PLUGIN_DATA_PATH = CONFIG_PATH / "plugins"`），
+两者互不相干。
+
+**除界面外的其它更新方式**
+
+| 当初怎么装的 | 怎么更新 |
+|---|---|
+| 方式 A（`install.sh`） | 覆盖新的项目目录后重跑 `./install.sh`（幂等，自带旧版备份） |
+| 方式 B（手动 `docker cp`） | 重新解压新的 `dist/openrouterhelper-<版本>.zip`，再 `docker cp` 覆盖 + 重启容器 |
+| 方式 C（插件市场） | 见上面 5 步 |
+| 源码部署 | `./install.sh --local /path/to/MoviePilot` |
+
+**指定版本回滚**（仅 `install.sh` 的 Docker 模式自带备份）：覆盖前会把容器内旧版本
+备份到 `/app/app/plugins/openrouterhelper.bak.<时间戳>/`，回滚时：
+
+```bash
+docker exec <容器名> rm -rf /app/app/plugins/openrouterhelper
+docker exec <容器名> cp -r /app/app/plugins/openrouterhelper.bak.20261012160336 \
+                            /app/app/plugins/openrouterhelper
+docker restart <容器名>
+```
+
+（源码 `--local` 模式与手动 `docker cp` 模式**不带备份**，需要留档的话自己先拷一份。）
+
 ---
 
 ## 3. 配置项

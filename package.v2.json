@@ -7,6 +7,7 @@
     "icon": "openrouterhelper.png",
     "author": "MT1992",
     "level": 1,
+    "release": true,
     "history": {
       "v1.1.0": "新增自动测速与可用性检测：并发探测每个免费模型的响应延迟与可调用性（ok/无Key/鉴权失败/额度耗尽/模型不存在/超时/网络异常），按延迟排行并标注到模型下拉框；支持自动切换到最快可用模型；401/429 自动熔断以免浪费免费额度；新增 /probe、/probe_model、/ranking 接口与定时测速任务",
       "v1.0.0": "首个版本：拉取 OpenRouter 免费模型，标注 tool calling 支持，一键填充智能助手，支持 app.env 持久化与定时刷新"
