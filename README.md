@@ -5,6 +5,7 @@
 - 插件 ID：`OpenRouterHelper`
 - 版本：`v1.0.0`
 - 依赖：`requests`、`python-dotenv`（MoviePilot 均已自带）
+- 仓库：<https://github.com/MT1992/MoviePilot-OpenRouterPlugin>
 
 ---
 
@@ -20,12 +21,12 @@ MoviePilot-OpenRouterPlugin/
 ├── plugins.v2/openrouterhelper/             # v2 插件本体
 │   ├── __init__.py                          #   目录名 = 类名小写
 │   └── requirements.txt
-├── plugins.v3/openrouterhelper/             # v3 插件本体（内容同上，导入路径兼容）
+├── plugins.v3/openrouterhelper/             # v3 插件本体（代码同上，见 §9 版本适配）
 ├── dist/
 │   ├── openrouterhelper-1.0.0.zip           # 手动安装包（解压即用）
 │   └── MoviePilot-OpenRouterPlugin-repo.zip # 整仓库包（可直接推 GitHub）
 └── dev/                                     # 开发自检（不部署）
-    ├── selftest.py                          # 43 项离线自检
+    ├── selftest.py                          # 46 项离线自检
     ├── or_models.sample.json                # 真实抓取的 OpenRouter 目录快照
     └── _stubs/                              # 模拟 MoviePilot 宿主的桩模块
 ```
@@ -262,14 +263,38 @@ python dev/selftest.py
 
 覆盖：免费模型判定 / tool calling 标注 / 目录拉取过滤 / 写回 `settings` / 模块热重载 /
 `app.env` 持久化（含目录自动创建）/ 幂等（无变化不重载）/ 表单与详情页结构 /
-API 的成功·401·429 分支 / 定时任务注册 / 选中模型下架兜底。当前 **43 项全部通过**。
+API 的成功·401·429 分支 / 定时任务注册 / 选中模型下架兜底 / 模块管理器三种降级路径。
+当前 **46 项全部通过**。
 
 ---
 
 ## 8. 实现要点
 
-- 宿主基类与配置对象做了双路径兼容导入（`app.plugins` / `app.sdk.plugin.base`、`app.core.config` / `app.runtime.config`）。
+- 宿主基类、配置对象、模块管理器都做了多路径兼容导入，路径逐条取自官方源码而非猜测：
+  `_PluginBase` ← `app.plugins` / `app.sdk.plugin`；`settings` ← `app.core.config` / `app.sdk.config` / `app.runtime.config`；
+  `ModuleManager` ← `app.core.module` / `app.sdk.plugin`。
 - 写回配置采用 MoviePilot 官方 ConfigCenter 插件的同款方式：
   `setattr(settings, key, value)` 运行时生效 → `dotenv.set_key` 落 `app.env` → `ModuleManager().stop()/load_modules()` 热重载。
+- 热重载是**尽力而为**：宿主没有模块管理器、或不提供 `load_modules` / `reload` 时安静跳过（只记一条 info 日志），
+  配置本身已写入 `app.env`，重启后必然生效，功能不受影响。
 - `apply_to_agent()` 幂等：目标值已一致时不写文件、不重载模块，避免每次启动都触发全量模块重载。
 - 模型清单带 TTL 缓存（`refresh_hours`），启动时不发网络请求，只在打开配置页/定时任务/手动刷新时拉取。
+
+---
+
+## 9. 版本适配（v2 / v3）
+
+仓库同时提供 `plugins.v2` 与 `plugins.v3` 两套目录，插件代码一致，靠导入路径兼容两种宿主。
+
+| 宿主 | 市场清单 | 加载目录 | 状态 |
+|------|---------|---------|------|
+| MoviePilot v2 | `package.v2.json` | `plugins.v2/` | 43 项离线自检通过 |
+| MoviePilot v3 | `package.v3.json`（`system_version: >=3.0.0`） | `plugins.v3/` | 导入路径已逐条对齐官方 v3 源码；**未在真实 v3 实例上运行验证** |
+
+v3 的差异（均按官方源码核对，非推测）：
+
+- `_PluginBase` 归属 `app.sdk.plugin`。v3 里 `app/plugins/` 只剩命名空间，`app.plugins._PluginBase` 由 Compat 惰性解析，仍可用。
+- `settings`：官方 v3 插件用 `app.sdk.config`；`app.core.config` 在 v3 也仍然存在（官方 `plugins.v3/chatgpt` 即在用）。
+- **`app/core/module.py` 在 v3 已删除**，所以 v3 上取不到 `ModuleManager`，插件会安静跳过热重载并记一条 info —— 配置已写入 `app.env`，**重启容器后生效**，其余功能不受影响。
+- `settings.CONFIG_PATH` 在 v3 仍存在，`app.env` 路径不变（`CONFIG_PATH/app.env`）。
+- `app.log.logger` 在 v3 仍然是官方插件通用写法，无需改。

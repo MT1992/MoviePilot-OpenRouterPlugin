@@ -8,6 +8,7 @@ OpenRouterHelper 离线自检脚本（开发用，不属于插件本体）
     - 填充智能助手：setattr(settings) + 模块热重载 + app.env 持久化 + 幂等
     - get_form / get_page 结构
     - /test 接口的成功、401、429 分支
+    - 模块管理器三种降级路径（无管理器 / 无 load_modules / 管理器报错）
 
 运行：
     "C:/Users/wangh/.workbuddy/binaries/python/envs/default/Scripts/python.exe" dev/selftest.py
@@ -257,6 +258,50 @@ def main():
     plugin._model = "vendor/removed-model:free"
     plugin.refresh_models(force=True)
     check("选中模型不在免费列表时给出提示（不崩溃）", True)
+
+    print("\n=== 10. 模块管理器降级（v3 无 app/core/module.py 的场景）===")
+
+    real_mm = openrouterhelper.ModuleManager
+
+    # 10.1 宿主取不到模块管理器（v3：app.core.module 已删除，app.sdk.plugin 也没有时）
+    openrouterhelper.ModuleManager = None
+    try:
+        plugin._reload_modules()
+        check("无模块管理器时安静跳过（不抛异常）", True)
+    except Exception as err:  # noqa: BLE001
+        check("无模块管理器时安静跳过（不抛异常）", False, repr(err))
+
+    # 10.2 管理器存在但只有 stop()，没有 load_modules()/reload()
+    class _PartialManager:
+        stopped = 0
+
+        def stop(self):
+            _PartialManager.stopped += 1
+
+    openrouterhelper.ModuleManager = _PartialManager
+    try:
+        plugin._reload_modules()
+        check(
+            "管理器缺 load_modules 时不抛异常，只跳过加载",
+            _PartialManager.stopped == 1,
+            f"stop 调用 {_PartialManager.stopped} 次",
+        )
+    except Exception as err:  # noqa: BLE001
+        check("管理器缺 load_modules 时不抛异常，只跳过加载", False, repr(err))
+
+    # 10.3 管理器自身报错时必须被吞掉，不能冒泡打断 apply_to_agent
+    class _BrokenManager:
+        def __init__(self):
+            raise RuntimeError("boom")
+
+    openrouterhelper.ModuleManager = _BrokenManager
+    try:
+        plugin._reload_modules()
+        check("管理器初始化失败被捕获（配置不受影响）", True)
+    except Exception as err:  # noqa: BLE001
+        check("管理器初始化失败被捕获（配置不受影响）", False, repr(err))
+
+    openrouterhelper.ModuleManager = real_mm
 
     print(f"\n{'=' * 46}\n结果：PASS={PASS}  FAIL={FAIL}\n{'=' * 46}")
     return 0 if FAIL == 0 else 1

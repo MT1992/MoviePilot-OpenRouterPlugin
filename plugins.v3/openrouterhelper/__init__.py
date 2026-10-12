@@ -28,23 +28,29 @@ import requests
 
 from app.log import logger
 
-# --- 宿主基类：兼容 v2 与 ADR-0008 归位后的 SDK 路径 ---
+# --- 宿主基类：兼容 v2(app.plugins) 与 v3(app.sdk.plugin) ---
 try:
     from app.plugins import _PluginBase
 except ImportError:  # pragma: no cover - 新版本归位到 SDK
-    from app.sdk.plugin.base import _PluginBase
+    from app.sdk.plugin import _PluginBase
 
-# --- 运行配置对象：兼容 v2(app.core.config) 与 v3(app.runtime.config) ---
+# --- 运行配置对象：v2 用 app.core.config，v3 优先 app.sdk.config ---
 try:
     from app.core.config import settings
 except ImportError:  # pragma: no cover
-    from app.runtime.config import settings
+    try:
+        from app.sdk.config import settings
+    except ImportError:  # pragma: no cover
+        from app.runtime.config import settings
 
-# --- 模块管理器：用于改配置后热重载 ---
+# --- 模块管理器：改配置后热重载（v2: app.core.module；v3: app.sdk.plugin）---
 try:
     from app.core.module import ModuleManager
 except ImportError:  # pragma: no cover
-    ModuleManager = None
+    try:
+        from app.sdk.plugin import ModuleManager
+    except ImportError:  # pragma: no cover
+        ModuleManager = None
 
 # --- 定时任务触发器 ---
 try:
@@ -326,13 +332,28 @@ class OpenRouterHelper(_PluginBase):
         logger.info(f"OpenRouterHelper 已写入 app.env：{list(values.keys())}")
 
     def _reload_modules(self):
+        """改完配置后热重载模块，让智能助手立即用上新模型。
+
+        宿主各版本的模块管理器入口与方法名并不统一（v2 为
+        app.core.module.ModuleManager.load_modules，v3 已不再导出该方法），
+        所以这里逐级探测；不支持时安静跳过 —— 配置已写入 app.env，
+        重启容器后同样生效。
+        """
         if not ModuleManager:
+            logger.info("OpenRouterHelper 未找到模块管理器，配置将在下次重启后生效")
             return
         try:
-            ModuleManager().stop()
-            ModuleManager().load_modules()
+            manager = ModuleManager()
+            stop = getattr(manager, "stop", None)
+            load = getattr(manager, "load_modules", None) or getattr(manager, "reload", None)
+            if stop:
+                stop()
+            if load:
+                load()
+            else:
+                logger.info("OpenRouterHelper 当前宿主不支持热重载，配置将在下次重启后生效")
         except Exception as err:  # noqa: BLE001
-            logger.error(f"OpenRouterHelper 模块重载失败：{err}")
+            logger.warn(f"OpenRouterHelper 模块重载失败（配置已写入，重启后生效）：{err}")
 
     def apply_to_agent(self) -> Dict[str, Any]:
         """把当前选择填充到智能助手配置（幂等：无变化则不重载模块）。"""

@@ -8,6 +8,7 @@
     "author": "MT1992",
     "level": 1,
     "release": true,
+    "system_version": ">=3.0.0",
     "history": {
       "v1.0.0": "首个版本：拉取 OpenRouter 免费模型，标注 tool calling 支持，一键填充智能助手，支持 app.env 持久化与定时刷新"
     }
