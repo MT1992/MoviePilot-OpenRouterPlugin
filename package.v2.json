@@ -1,0 +1,14 @@
+{
+  "OpenRouterHelper": {
+    "name": "OpenRouter 免费模型助手",
+    "description": "自动获取 OpenRouter 免费模型（零价），并一键填充到 MoviePilot 智能助手(LLM)配置。",
+    "labels": "AI,工具",
+    "version": "1.0.0",
+    "icon": "openrouterhelper.png",
+    "author": "wangh",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首个版本：拉取 OpenRouter 免费模型，标注 tool calling 支持，一键填充智能助手，支持 app.env 持久化与定时刷新"
+    }
+  }
+}
