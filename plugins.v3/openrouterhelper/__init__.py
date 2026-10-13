@@ -2,8 +2,10 @@
 MoviePilot 插件：OpenRouter 免费模型助手 (OpenRouterHelper)
 
 功能：
-    1. 自动从 OpenRouter 拉取模型目录，识别其中的免费模型
+    1. 自动从站点拉取模型目录，识别其中的免费模型
        （pricing.prompt == 0 且 pricing.completion == 0，排除音频生成等非对话模型）。
+       站点可选内置预设（OpenRouter / Nous Portal）或自定义地址。目录若不含定价字段，
+       则降级为「列出全部对话模型」并给出提示。
     2. 将选定的免费模型一键填充到 MoviePilot「智能助手 / LLM」配置：
            LLM_PROVIDER / LLM_BASE_URL / LLM_API_KEY / LLM_MODEL / LLM_API_PROTOCOL
        可选同时打开 AI_AGENT_ENABLE。
@@ -17,9 +19,16 @@ MoviePilot 插件：OpenRouter 免费模型助手 (OpenRouterHelper)
     6. 支持写入 app.env 持久化（重启后仍生效），支持定时刷新目录与定时测速。
 
 关于探测代价（重要）：
-    一次探测 = 一次真实对话请求，会消耗 OpenRouter 免费额度（未充值约 50 次/天）。
+    一次探测 = 一次真实对话请求，会消耗站点免费额度（OpenRouter 未充值约 50 次/天）。
     因此：自动测速默认关闭；探测并发默认 4；一旦发现鉴权失败或额度耗尽会立即熔断
     并停止剩余模型的探测，避免白烧配额。
+
+同类站点（2026-10-13 实测）：
+    - Nous Portal（https://inference-api.nousresearch.com/v1）：/models 与 OpenRouter
+      完全同构（带 pricing / architecture / supported_parameters，免费模型带 :free 后缀），
+      423 个模型中 372 个 id 与 OpenRouter 重合，已内置为预设。
+    - 其他 OpenAI 风格站点（OrcaRouter / LLM7.io / NVIDIA NIM 等）无 pricing 字段，
+      选择「自定义」填入其 /v1 地址即可，插件会退化为列出全部对话模型。
 
 实测边界（2026-10）：
     - GET https://openrouter.ai/api/v1/models 无需鉴权即可拉取（458 个模型，其中 19 个零价、16 个支持 tools）。
@@ -80,12 +89,45 @@ except ImportError:  # pragma: no cover
 
 # ============================ 常量 ============================
 
-# 模型目录接口（OpenRouter，无需鉴权）
-DEFAULT_LIST_URL = "https://openrouter.ai/api/v1/models"
-# OpenAI 兼容对话接口前缀
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-# MoviePilot 智能助手的提供商标识
-DEFAULT_PROVIDER = "openrouter"
+# ---------- 站点预设 ----------
+# 同类聚合站可用同一个插件驱动。实测（2026-10-13）Nous Portal 的 /models 与 OpenRouter
+# 完全同构：同样带 pricing / architecture / supported_parameters，免费模型同样带 :free 后缀，
+# 目录 423 个模型中 372 个 id 与 OpenRouter 重合，因此可直接复用同一套解析逻辑。
+# base_url / list_url / provider 三项留空即回落到当前预设。
+SITE_PRESETS = {
+    "openrouter": {
+        "label": "OpenRouter（官方）",
+        "base_url": "https://openrouter.ai/api/v1",
+        "list_url": "https://openrouter.ai/api/v1/models",
+        "provider": "openrouter",
+    },
+    "nousportal": {
+        "label": "Nous Portal（目录与 OpenRouter 同构）",
+        "base_url": "https://inference-api.nousresearch.com/v1",
+        "list_url": "https://inference-api.nousresearch.com/v1/models",
+        "provider": "nousresearch",
+    },
+    "custom": {
+        "label": "自定义（手填地址）",
+        "base_url": "",
+        "list_url": "",
+        "provider": "openai",
+    },
+}
+DEFAULT_PRESET = "openrouter"
+
+# 兼容旧引用（等价于 openrouter 预设）
+DEFAULT_LIST_URL = SITE_PRESETS["openrouter"]["list_url"]
+DEFAULT_BASE_URL = SITE_PRESETS["openrouter"]["base_url"]
+DEFAULT_PROVIDER = SITE_PRESETS["openrouter"]["provider"]
+
+# 目录里没有定价字段时的降级过滤：排掉明显不是对话模型的条目
+# （embedding / rerank / 音频 / 图像 / 审核类）。只有 has_pricing=False 时才启用。
+NON_CHAT_HINTS = (
+    "embed", "rerank", "bge-", "gte-", "tts", "whisper", "speech", "audio",
+    "voice", "image", "dall-e", "sora", "diffusion", "flux", "sdxl",
+    "stable-diffusion", "moderation", "guard", "safety", "ocr", "asr",
+)
 # 需要写回智能助手的配置键
 LLM_KEYS = (
     "LLM_PROVIDER",
@@ -127,9 +169,9 @@ PROBE_LABEL = {
 class OpenRouterHelper(_PluginBase):
     # ---------- 插件元信息 ----------
     plugin_name = "OpenRouter 免费模型助手"
-    plugin_desc = "自动获取 OpenRouter 免费模型，自动测速并检测可用性，一键填充到智能助手(LLM)配置。"
+    plugin_desc = "自动获取 OpenRouter / Nous Portal 等同类站点的免费模型，自动测速并检测可用性，一键填充到智能助手(LLM)配置。"
     plugin_icon = "openrouterhelper.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "MT1992"
     author_url = "https://github.com/MT1992"
     plugin_config_prefix = "openrouterhelper_"
@@ -145,9 +187,12 @@ class OpenRouterHelper(_PluginBase):
     _only_tool_models: bool = True
 
     _api_key: str = ""
+    _site_preset: str = DEFAULT_PRESET
     _base_url: str = DEFAULT_BASE_URL
     _list_url: str = DEFAULT_LIST_URL
     _provider: str = DEFAULT_PROVIDER
+    # 目录无定价字段时置 True：此时列的是全部对话模型，而不是筛选出的免费模型
+    _list_all_models: bool = False
     _protocol: str = "chat_completions"
     _model: str = ""
     _refresh_hours: int = 12
@@ -184,9 +229,37 @@ class OpenRouterHelper(_PluginBase):
         self._only_tool_models = bool(config.get("only_tool_models", True))
 
         self._api_key = str(config.get("api_key") or "").strip()
-        self._base_url = str(config.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
-        self._list_url = str(config.get("list_url") or DEFAULT_LIST_URL).strip()
-        self._provider = str(config.get("provider") or DEFAULT_PROVIDER).strip()
+        # ---------- 站点预设 ----------
+        # 规则：非 custom 预设下，base_url / list_url / provider 一律取预设值
+        # （表单里的同名字段不落配置，界面显示占位符以免误导）；
+        # 只有 custom 预设才用用户填写的值。
+        raw_preset = str(config.get("site_preset") or "").strip()
+        raw_base = str(config.get("base_url") or "").strip().rstrip("/")
+        raw_list = str(config.get("list_url") or "").strip()
+        raw_provider = str(config.get("provider") or "").strip()
+        if not raw_preset:
+            # 老配置没有该字段：若用户当初把地址改成了别处，按「自定义」对待，
+            # 免得升级后把既有设置吃掉。
+            if (raw_base and raw_base != DEFAULT_BASE_URL) or (
+                raw_list and raw_list != DEFAULT_LIST_URL
+            ):
+                raw_preset = "custom"
+                logger.info("OpenRouterHelper 检测到自定义 API 地址，站点预设按「自定义」处理")
+            else:
+                raw_preset = DEFAULT_PRESET
+        if raw_preset not in SITE_PRESETS:
+            raw_preset = DEFAULT_PRESET
+        self._site_preset = raw_preset
+        preset = SITE_PRESETS[raw_preset]
+        if raw_preset == "custom":
+            self._base_url = raw_base or DEFAULT_BASE_URL
+            self._list_url = raw_list or DEFAULT_LIST_URL
+            self._provider = raw_provider or preset["provider"]
+        else:
+            self._base_url = preset["base_url"]
+            self._list_url = preset["list_url"]
+            self._provider = preset["provider"]
+        self._list_all_models = False
         self._protocol = str(config.get("protocol") or "chat_completions").strip()
         self._model = str(config.get("model") or "").strip()
         self._site_url = str(config.get("site_url") or "").strip()
@@ -316,17 +389,53 @@ class OpenRouterHelper(_PluginBase):
         vendor, _, short = base.partition("/")
         return f"{vendor} {short}" if short else base
 
+    @staticmethod
+    def _looks_like_chat(item: dict) -> bool:
+        """目录没有定价字段时的降级判断：按 id / 名称排掉明显不是对话模型的条目。
+
+        只在 has_pricing=False（如 NVIDIA NIM、OrcaRouter 这类 OpenAI 风格目录）时启用，
+        判不准的一律保留，宁多勿少。
+        """
+        text = f"{item.get('id') or ''} {item.get('name') or ''}".lower()
+        if any(h in text for h in NON_CHAT_HINTS):
+            return False
+        mtype = str(item.get("model_type") or item.get("type") or "").lower()
+        if mtype and mtype not in ("chat", "text", "llm", "language", "completion"):
+            return False
+        return True
+
     def _parse_models(self, payload: dict) -> List[dict]:
         raw_items = payload.get("data") or payload.get("models") or []
+        # 有些平台的 /models 是 OpenAI 风格，只有 id，没有 pricing，判不出「免费」。
+        # 此时退化为列出全部对话模型，让用户自己从下拉里挑，
+        # 而不是静默返回空列表（之前填这类站会看起来「没拉到任何模型」）。
+        has_pricing = any(
+            isinstance(it, dict) and isinstance(it.get("pricing"), dict) and it["pricing"]
+            for it in raw_items
+        )
+        self._list_all_models = not has_pricing
+        if not has_pricing:
+            logger.warn(
+                f"OpenRouterHelper 模型目录没有定价字段（{self._list_url}），"
+                "改为列出全部对话模型，请自行确认哪些免费"
+            )
+
         models: List[dict] = []
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
             mid = item.get("id")
-            if not mid or not self._is_free(item):
+            if not mid:
+                continue
+            if has_pricing:
+                if not self._is_free(item):
+                    continue
+            elif not self._looks_like_chat(item):
                 continue
             has_tools = self._supports_tools(item)
-            if self._only_tool_models and not has_tools:
+            # 只有带定价信息的目录才敢按「支持工具调用」过滤：无定价目录通常也没有
+            # supported_parameters，照此过滤会把整站清空。
+            if has_pricing and self._only_tool_models and not has_tools:
                 continue
             models.append(
                 {
@@ -798,7 +907,20 @@ class OpenRouterHelper(_PluginBase):
     # ======================= 插件 API =======================
 
     def _current_config(self) -> Dict[str, Any]:
-        """当前配置快照（与 get_form 的默认值同构），用于 update_config 持久化。"""
+        """当前配置快照（与 get_form 的默认值同构），用于 update_config 持久化。
+
+        站点预设非 custom 时，base_url / list_url / provider 一律回写空串：
+        这三个值由预设决定，留空可以让表单只显示占位符、避免用户误以为要手填；
+        真正生效的值在 init_plugin 里按预设解析。只有 custom 预设才落具体值。
+        """
+        if self._site_preset == "custom":
+            base_url = self._base_url
+            list_url = self._list_url
+            provider = self._provider
+        else:
+            base_url = ""
+            list_url = ""
+            provider = ""
         return {
             "enabled": self._enabled,
             "auto_apply": self._auto_apply,
@@ -807,9 +929,10 @@ class OpenRouterHelper(_PluginBase):
             "use_proxy": self._use_proxy,
             "only_tool_models": self._only_tool_models,
             "api_key": self._api_key,
-            "base_url": self._base_url,
-            "list_url": self._list_url,
-            "provider": self._provider,
+            "site_preset": self._site_preset,
+            "base_url": base_url,
+            "list_url": list_url,
+            "provider": provider,
             "protocol": self._protocol,
             "model": self._model,
             "refresh_hours": self._refresh_hours,
@@ -1089,10 +1212,53 @@ class OpenRouterHelper(_PluginBase):
         if not model_items:
             model_items = [{"title": "（暂无数据，请先填写 API Key 后保存，再重新打开）", "value": ""}]
 
+        preset_items = [
+            {"title": cfg["label"], "value": key} for key, cfg in SITE_PRESETS.items()
+        ]
+        # 目录没有定价字段时，下拉里列的是全部对话模型而非免费模型，标签要说清楚
+        model_label = "全部对话模型 (LLM_MODEL)" if self._list_all_models else "免费模型 (LLM_MODEL)"
+
         form = [
             {
                 "component": "VForm",
                 "content": [
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "site_preset",
+                                            "label": "站点预设（选好即自动填对地址）",
+                                            "items": preset_items,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "text": (
+                                                "选非「自定义」时，下方 API 地址/目录接口/提供商由预设决定，无需手填；"
+                                                "只有选「自定义」才需要自己填。换站后请点一次「刷新模型目录」。"
+                                            ),
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     {
                         "component": "VRow",
                         "content": [
@@ -1139,9 +1305,9 @@ class OpenRouterHelper(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "api_key",
-                                            "label": "OpenRouter API Key",
+                                            "label": "API Key",
                                             "type": "password",
-                                            "placeholder": "在 https://openrouter.ai/keys 创建，调用免费模型同样需要",
+                                            "placeholder": "OpenRouter 在 https://openrouter.ai/keys 创建；调用免费模型同样需要",
                                         },
                                     }
                                 ],
@@ -1169,7 +1335,7 @@ class OpenRouterHelper(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "base_url",
-                                            "label": "API 地址 (LLM_BASE_URL)",
+                                            "label": "API 地址 (LLM_BASE_URL)　仅自定义时生效",
                                             "placeholder": DEFAULT_BASE_URL,
                                         },
                                     }
@@ -1183,7 +1349,7 @@ class OpenRouterHelper(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "list_url",
-                                            "label": "模型目录接口",
+                                            "label": "模型目录接口　仅自定义时生效",
                                             "placeholder": DEFAULT_LIST_URL,
                                         },
                                     }
@@ -1202,7 +1368,7 @@ class OpenRouterHelper(_PluginBase):
                                         "component": "VSelect",
                                         "props": {
                                             "model": "model",
-                                            "label": "免费模型 (LLM_MODEL)",
+                                            "label": model_label,
                                             "items": model_items,
                                         },
                                     }
@@ -1216,10 +1382,14 @@ class OpenRouterHelper(_PluginBase):
                                         "component": "VSelect",
                                         "props": {
                                             "model": "provider",
-                                            "label": "提供商 (LLM_PROVIDER)",
+                                            "label": "提供商 (LLM_PROVIDER)　仅自定义时生效",
                                             "items": [
                                                 {"title": "openrouter", "value": "openrouter"},
                                                 {"title": "openai (兼容模式)", "value": "openai"},
+                                                {
+                                                    "title": "nousresearch",
+                                                    "value": "nousresearch",
+                                                },
                                                 {"title": "custom", "value": "custom"},
                                             ],
                                         },
@@ -1449,6 +1619,8 @@ class OpenRouterHelper(_PluginBase):
                                             "text": (
                                                 "说明：OpenRouter 调用免费模型同样必须携带 API Key（免费额度按账号计，"
                                                 "未充值约 50 次/天，累计充值 ≥10 美元后约 1000 次/天）。"
+                                                "站点预设里另有 Nous Portal 等与 OpenRouter 目录同构的站点，"
+                                                "换站后记得点「刷新模型目录」并重新测速。"
                                                 "智能助手依赖 tool calling，建议保持「仅显示支持工具调用」开启。"
                                                 "勾选「写入 app.env 持久化」后，配置在重启后仍生效；"
                                                 "若同名配置已由 Docker 环境变量注入，环境变量优先级更高。"
@@ -1541,7 +1713,10 @@ class OpenRouterHelper(_PluginBase):
                     "title": "运行状态",
                     "text": (
                         f"插件：{'已启用' if self._enabled else '未启用'}　"
-                        f"上次刷新：{last}　免费模型：{len(models)} 个（支持工具调用 {tool_count} 个）　"
+                        f"站点：{SITE_PRESETS.get(self._site_preset, {}).get('label', self._site_preset)}　"
+                        f"上次刷新：{last}　"
+                        f"{'对话模型' if self._list_all_models else '免费模型'}：{len(models)} 个"
+                        f"（支持工具调用 {tool_count} 个）　"
                         f"上次测速：{last_probe}　已测：{len(self._probe_results)} 个"
                         f"（可用 {len(ok_models)}／未测 {len(untested)}／异常 {len(bad_models)}）"
                     ),
@@ -1583,6 +1758,23 @@ class OpenRouterHelper(_PluginBase):
                 },
             },
         ]
+
+        if self._list_all_models:
+            alerts.append(
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "warning",
+                        "variant": "tonal",
+                        "title": "当前站点目录不含定价字段",
+                        "text": (
+                            f"{self._list_url} 未返回 pricing 字段，无法自动判定哪些模型免费，"
+                            "因此下拉里列出的是全部对话模型（已按名称排掉 embedding/音频/图像等非对话条目），"
+                            "「仅显示支持工具调用」在此模式下不生效。请以站点官方文档为准挑选免费模型。"
+                        ),
+                    },
+                }
+            )
         return alerts
 
     # ======================= 远程命令 =======================

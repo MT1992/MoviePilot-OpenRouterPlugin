@@ -571,6 +571,169 @@ def main():
     )
     check("保留仍在列表中的测速记录", m_a in plugin._probe_results)
 
+    print("\n=== 12. 站点预设与无定价目录降级 ===")
+    from openrouterhelper import SITE_PRESETS
+
+    check("内置至少 3 个预设", len(SITE_PRESETS) >= 3, str(list(SITE_PRESETS)))
+    check(
+        "预设 key 齐全",
+        {"openrouter", "nousportal", "custom"} <= set(SITE_PRESETS),
+        str(list(SITE_PRESETS)),
+    )
+
+    # 12.1 预设解析：openrouter
+    p1 = OpenRouterHelper()
+    p1.init_plugin({"enabled": True, "site_preset": "openrouter", "api_key": "k"})
+    check("openrouter 预设解析 base_url", p1._base_url == "https://openrouter.ai/api/v1", p1._base_url)
+    check("openrouter 预设解析 provider", p1._provider == "openrouter", p1._provider)
+
+    # 12.2 预设解析：nousportal（目录与 OpenRouter 同构）
+    p2 = OpenRouterHelper()
+    p2.init_plugin({"enabled": True, "site_preset": "nousportal", "api_key": "k"})
+    check(
+        "nousportal 预设解析 base_url",
+        p2._base_url == "https://inference-api.nousresearch.com/v1",
+        p2._base_url,
+    )
+    check(
+        "nousportal 预设解析 list_url",
+        p2._list_url == "https://inference-api.nousresearch.com/v1/models",
+        p2._list_url,
+    )
+    check("nousportal 预设解析 provider", p2._provider == "nousresearch", p2._provider)
+
+    # 12.3 预设解析：custom 用用户填的值
+    p3 = OpenRouterHelper()
+    p3.init_plugin(
+        {
+            "enabled": True,
+            "site_preset": "custom",
+            "base_url": "https://api.example.com/v1/",
+            "list_url": "https://api.example.com/v1/models",
+            "provider": "openai",
+        }
+    )
+    check("custom 预设用用户填的 base_url", p3._base_url == "https://api.example.com/v1", p3._base_url)
+    check("custom 预设用用户填的 provider", p3._provider == "openai", p3._provider)
+
+    # 12.4 老配置迁移：无 site_preset 且地址被改过 → 按自定义，不吃掉既有设置
+    p4 = OpenRouterHelper()
+    p4.init_plugin({"enabled": True, "base_url": "https://my.proxy.local/v1"})
+    check("老配置改过地址 → 识别为 custom", p4._site_preset == "custom", p4._site_preset)
+    check("老配置自定义地址被保留", p4._base_url == "https://my.proxy.local/v1", p4._base_url)
+
+    # 12.5 老配置迁移：无 site_preset 且地址为默认 → 视为 openrouter
+    p5 = OpenRouterHelper()
+    p5.init_plugin({"enabled": True, "base_url": "https://openrouter.ai/api/v1"})
+    check("老配置默认地址 → 识别为 openrouter", p5._site_preset == "openrouter", p5._site_preset)
+
+    # 12.6 非法预设名回落
+    p6 = OpenRouterHelper()
+    p6.init_plugin({"enabled": True, "site_preset": "not-exist"})
+    check("非法预设名回落到默认", p6._site_preset == "openrouter", p6._site_preset)
+
+    # 12.7 _current_config 回写策略
+    cfg1 = p2._current_config()
+    check("非自定义预设回写空 base_url（让表单只显示占位符）", cfg1["base_url"] == "", repr(cfg1["base_url"]))
+    check("非自定义预设回写空 list_url", cfg1["list_url"] == "", repr(cfg1["list_url"]))
+    check("非自定义预设回写空 provider", cfg1["provider"] == "", repr(cfg1["provider"]))
+    check("配置快照含 site_preset", cfg1.get("site_preset") == "nousportal", repr(cfg1.get("site_preset")))
+    cfg3 = p3._current_config()
+    check("自定义预设回写具体 base_url", cfg3["base_url"] == "https://api.example.com/v1", cfg3["base_url"])
+    check("自定义预设回写具体 provider", cfg3["provider"] == "openai", cfg3["provider"])
+
+    # 12.8 配置页含站点预设下拉，且项数与预设数一致
+    form2, defaults2 = p2.get_form()
+    preset_sel = []
+
+    def walk_for(node, model_name, found):
+        if isinstance(node, dict):
+            props = node.get("props") or {}
+            if props.get("model") == model_name and "items" in props:
+                found.append(props["items"])
+            for v in node.values():
+                walk_for(v, model_name, found)
+        elif isinstance(node, list):
+            for v in node:
+                walk_for(v, model_name, found)
+
+    walk_for(form2, "site_preset", preset_sel)
+    check("配置页含 site_preset 下拉", len(preset_sel) == 1, str(len(preset_sel)))
+    check(
+        "预设下拉列出全部预设",
+        bool(preset_sel) and {it["value"] for it in preset_sel[0]} == set(SITE_PRESETS),
+        str(preset_sel[0] if preset_sel else None),
+    )
+    check("预设默认值已回填", defaults2.get("site_preset") == "nousportal", repr(defaults2.get("site_preset")))
+
+    # 12.9 无定价目录 → 降级为列出全部对话模型
+    nopricing_payload = {
+        "data": [
+            {"id": "meta/llama-3.3-70b-instruct", "name": "Llama 3.3 70B"},
+            {"id": "org/chat-model-x"},
+            {"id": "nvidia/llama-3.2-nv-embedqa-1b", "name": "Embed QA"},
+            {"id": "openai/whisper-large-v3", "name": "Whisper"},
+            {"id": "stabilityai/stable-diffusion-xl", "name": "SDXL"},
+            {"id": "orcarouter/free", "name": "Free Router"},
+        ]
+    }
+
+    def fake_get_nopricing(url, **kwargs):
+        calls["get"] += 1
+        return _FakeResp(nopricing_payload)
+
+    p7 = OpenRouterHelper()
+    p7.init_plugin(
+        {
+            "enabled": True,
+            "site_preset": "custom",
+            "base_url": "https://api.example.com/v1",
+            "list_url": "https://api.example.com/v1/models",
+            "provider": "openai",
+            "only_tool_models": True,
+        }
+    )
+    real_get = openrouterhelper.requests.get
+    openrouterhelper.requests.get = fake_get_nopricing
+    got7 = p7.refresh_models(force=True)
+    got7_ids = [m["id"] for m in got7]
+    check("无定价目录 → 置 _list_all_models", p7._list_all_models is True)
+    check("无定价目录 → 列出全部对话模型（3 个）", len(got7) == 3, str(got7_ids))
+    check("排除 embedding", not any("embed" in i for i in got7_ids), str(got7_ids))
+    check("排除 whisper 语音", not any("whisper" in i.lower() for i in got7_ids), str(got7_ids))
+    check("排除 stable-diffusion 图像", not any("stable-diffusion" in i for i in got7_ids), str(got7_ids))
+    check("保留 orcarouter/free", "orcarouter/free" in got7_ids, str(got7_ids))
+    check("无定价目录下不因 tools 过滤清空", len(got7) >= 2, str(got7_ids))
+
+    form7, defaults7 = p7.get_form()
+    lbl = []
+
+    def walk_label(node, out):
+        if isinstance(node, dict):
+            props = node.get("props") or {}
+            if props.get("model") == "model" and "label" in props:
+                out.append(props["label"])
+            for v in node.values():
+                walk_label(v, out)
+        elif isinstance(node, list):
+            for v in node:
+                walk_label(v, out)
+
+    walk_label(form7, lbl)
+    check("降级后模型下拉标签改为「全部对话模型」", bool(lbl) and "全部对话模型" in lbl[0], str(lbl))
+
+    page7 = p7.get_page()
+    check(
+        "详情页提示当前站点目录无定价字段",
+        any("不含定价字段" in (p.get("props") or {}).get("title", "") for p in page7),
+        str([p.get("props", {}).get("title") for p in page7]),
+    )
+    check(
+        "详情页运行状态显示站点名",
+        any("Nous Portal" in (p.get("props") or {}).get("text", "") for p in p2.get_page()),
+    )
+    openrouterhelper.requests.get = real_get
+
     print(f"\n{'=' * 46}\n结果：PASS={PASS}  FAIL={FAIL}\n{'=' * 46}")
     return 0 if FAIL == 0 else 1
 

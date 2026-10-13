@@ -1,10 +1,11 @@
 # MoviePilot 插件：OpenRouter 免费模型助手
 
-自动从 **OpenRouter** 拉取免费（零价）模型清单，**自动测速并检测每个模型能否调用**，
-再把最优模型一键填充到 MoviePilot 智能助手（LLM）配置。
+自动从 **OpenRouter**（以及 **Nous Portal** 等目录同构的同类站点）拉取免费（零价）模型清单，
+**自动测速并检测每个模型能否调用**，再把最优模型一键填充到 MoviePilot 智能助手（LLM）配置。
 
+- 支持站点预设切换（OpenRouter / Nous Portal / 自定义），目录无定价字段时自动降级为列出全部对话模型
 - 插件 ID：`OpenRouterHelper`
-- 版本：`v1.1.0`
+- 版本：`v1.2.0`
 - 依赖：`requests`、`python-dotenv`（MoviePilot 均已自带）
 - 仓库：<https://github.com/MT1992/MoviePilot-OpenRouterPlugin>
 
@@ -227,15 +228,16 @@ docker restart <容器名>
 
 | 字段 | 说明 | 默认 |
 |------|------|------|
+| **站点预设** | 选 OpenRouter / Nous Portal，或「自定义」手填地址。**非自定义时下方地址与提供商由预设决定** | `OpenRouter（官方）` |
 | 启用插件 | 总开关 | 关 |
 | 保存时自动填充 | 保存配置即写回智能助手 | 关 |
 | 写入 app.env 持久化 | 落盘到配置文件，重启后仍生效 | 关 |
-| **OpenRouter API Key** | `https://openrouter.ai/keys` 创建。**调免费模型也必须填** | 空 |
+| **API Key** | OpenRouter 在 `https://openrouter.ai/keys` 创建。**调免费模型也必须填** | 空 |
 | 同时启用智能助手 | 一并把 `AI_AGENT_ENABLE` 置为 true | 关 |
-| API 地址 | 写入 `LLM_BASE_URL` | `https://openrouter.ai/api/v1` |
-| 模型目录接口 | 拉取清单用，无需鉴权 | `https://openrouter.ai/api/v1/models` |
-| 免费模型 | 写入 `LLM_MODEL`，下拉从目录动态生成并按测速排行 | 空 |
-| 提供商 | 写入 `LLM_PROVIDER` | `openrouter` |
+| API 地址 | 写入 `LLM_BASE_URL`，**仅「自定义」预设时生效** | 预设决定 |
+| 模型目录接口 | 拉取清单用，**仅「自定义」预设时生效** | 预设决定 |
+| 免费模型 | 写入 `LLM_MODEL`，下拉从目录动态生成并按测速排行。目录无定价字段时改为列出全部对话模型 | 空 |
+| 提供商 | 写入 `LLM_PROVIDER`，**仅「自定义」预设时生效** | 预设决定 |
 | 接口协议 | 写入 `LLM_API_PROTOCOL` | `chat_completions` |
 | 目录刷新间隔(小时) | 定时刷新清单，`0` 关闭 | `12` |
 | **启用自动测速与可用性检测** | 定时探测每个免费模型的延迟与可调用性 | 关 |
@@ -246,7 +248,7 @@ docker restart <容器名>
 | **每次最多探测模型数** | `0` = 全部（**每探一个消耗一次免费额度**） | `0` |
 | **探测问题** | 探测时发送的内容，越短越省 token | `hi` |
 | 走系统代理 | 使用 MoviePilot 的 `PROXY_HOST` | 关 |
-| 仅显示支持工具调用 | 过滤掉不支持 function calling 的免费模型 | **开** |
+| 仅显示支持工具调用 | 过滤掉不支持 function calling 的免费模型（目录无定价字段时不生效） | **开** |
 | 应用地址 / 应用名称 | OpenRouter 归属头 `HTTP-Referer` / `X-Title`（可选） | 空 / `MoviePilot` |
 
 **填充后写回智能助手的键：**
@@ -400,6 +402,43 @@ docker restart <容器名>
 - 模型目录会变（下架 / 转付费）。插件在刷新时若发现当前选中的模型已不在免费列表，会在日志里提示重新选择。
 - MoviePilot 配置优先级为 **环境变量 > app.env ≈ WEB 界面**。若 `LLM_*` 已由 Docker 环境变量注入，写 `app.env` 不会覆盖它，此时请改用环境变量或去掉对应 `-e`。
 
+### 同类站点（2026-10-13 实测）
+
+「站点预设」下拉里内置了与 OpenRouter 目录**同构**的站点；换站只要在预设里选一下，再点「刷新模型目录」并重新测速即可。
+
+| 站点 | API 地址 | 目录是否需鉴权 | 目录格式 | 是否内置预设 |
+|------|----------|----------------|----------|--------------|
+| **OpenRouter** | `https://openrouter.ai/api/v1` | 否 | 带 `pricing`/`architecture`/`supported_parameters` | ✅ `OpenRouter（官方）` |
+| **Nous Portal** | `https://inference-api.nousresearch.com/v1` | 否 | **与 OpenRouter 完全同构** | ✅ `Nous Portal` |
+| OrcaRouter | `https://api.orcarouter.ai/v1` | 是 | OpenAI 风格，无 `pricing` | 自定义 |
+| LLM7.io | `https://api.llm7.io/v1` | 否 | 无 `pricing`，自带 `tools_calling` | 自定义 |
+| NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | 否 | OpenAI 风格 | 自定义 |
+| UnoRouter | `https://api.unorouter.com/v1` | 是 | OpenAI 风格 | 自定义 |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | 是 | OpenAI 风格 | 自定义 |
+
+**Nous Portal 实测（2026-10-13）**：目录 423 个模型，其中 **372 个 id 与 OpenRouter 重合**（51 个独有）；
+同构字段完全一致，免费模型同样带 `:free` 后缀，因此插件把它做成了内置预设，选中即自动填好地址。
+它的 11 个零价模型**全部支持 tool calling**，例如：
+
+| 模型 id | 上下文 |
+|---------|--------|
+| `stepfun/step-5-preview:free` | 1000K |
+| `meituan/longcat-2.5-preview:free` | 1048576 |
+| `upstage/solar-mini4:free` | 524288 |
+| `poolside/laguna-s-2.1:free` | 256K |
+
+> ⚠️ 实测中这些站点的**调用侧几乎都要求 Key**（Nous Portal 对匿名请求返回 402；
+> OrcaRouter 401；LLM7.io 503；OpenRouter 401），插件因此统一按「带 Key 调用」设计。
+> 换站后 API Key 通常也要跟着换。
+
+**无定价字段站点的降级行为**：目录里没有 `pricing` 时（如 OrcaRouter / NVIDIA NIM），
+插件无法自动判断哪些免费，于是改为**列出全部对话模型**（按名称排掉 embedding / rerank / 音频 / 图像 / 审核等条目），
+同时「仅显示支持工具调用」在该模式下不生效，配置页与详情页都会给出提示。哪些模型免费请以站点官方文档为准。
+
+**国内站的另一条路**：若只想给智能助手找个稳定免费模型，国内站更省心 ——
+智谱 `GLM-4-Flash` / `GLM-4.7-Flash`、硅基流动 9B 以下模型、百度千帆 `ERNIE-Speed` 均为长期免费，
+用「自定义」预设填其 OpenAI 兼容地址即可。
+
 ### 熔断实测（2026-10-12）
 
 用无效 Key 对 16 个模型做真实探测（并发 4），结果：
@@ -428,8 +467,11 @@ python dev/selftest.py
 `app.env` 持久化（含目录自动创建）/ 幂等（无变化不重载）/ 表单与详情页结构 /
 API 的成功·401·429 分支 / 定时任务注册 / 选中模型下架兜底 / 模块管理器三种降级路径 /
 **测速与探测**（状态分类表、无 Key 短路、超时与网络异常归类、并发全量探测与延迟排序、
-401·429 熔断、自动切换最快可用模型、切换结果持久化、探测缓存与下架清理、下拉标注渲染）。
-当前 **91 项全部通过**。
+401·429 熔断、自动切换最快可用模型、切换结果持久化、探测缓存与下架清理、下拉标注渲染）/
+**站点预设**（三档预设解析、老配置迁移、非法预设回落、配置回写策略、预设下拉渲染）与
+**无定价目录降级**（置位 `_list_all_models`、排掉 embedding/音频/图像、不因 tools 过滤清空、
+下拉标签改写、详情页提示）。
+当前 **123 项全部通过**。
 
 ---
 
@@ -457,7 +499,7 @@ API 的成功·401·429 分支 / 定时任务注册 / 选中模型下架兜底 /
 
 | 宿主 | 市场清单 | 加载目录 | 状态 |
 |------|---------|---------|------|
-| MoviePilot v2 | `package.v2.json` | `plugins.v2/` | 91 项离线自检通过 |
+| MoviePilot v2 | `package.v2.json` | `plugins.v2/` | 123 项离线自检通过 |
 | MoviePilot v3 | `package.v3.json`（`system_version: >=3.0.0`） | `plugins.v3/` | 导入路径已逐条对齐官方 v3 源码；**未在真实 v3 实例上运行验证** |
 
 v3 的差异（均按官方源码核对，非推测）：
